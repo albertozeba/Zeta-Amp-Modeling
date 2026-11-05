@@ -29,6 +29,9 @@ public:
 
     juce::AudioProcessorValueTreeState apvts;
     std::atomic<float> outLevel { 0.0f };
+    std::atomic<bool> irLoaded { false };
+    bool loadSample (const juce::File&);
+    bool loadIR (const juce::File&);
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -46,6 +49,14 @@ private:
     float lastIn = 1.0f, lastDrive = 1.0f, lastMaster = 0.0f;
     float lastBass = -999.f, lastMid = -999.f, lastTreble = -999.f;
     float lpState[2] { 0.0f, 0.0f };
+    void makeTestRiff (double sr);
+    juce::AudioBuffer<float> testBuf;
+    std::shared_ptr<juce::AudioBuffer<float>> pendingSample, audioSample;
+    bool samplePending = false;
+    juce::SpinLock sampleLock;
+    int playPos = 0;
+    float trPhase = 0.0f;
+    juce::dsp::Convolution conv;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AmpLabProcessor)
 };

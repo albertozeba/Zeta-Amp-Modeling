@@ -28,8 +28,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout AmpLabProcessor::createLayou
     knob ("rsize", "Ambiente", 4); knob ("rtone", "Tono", 6);     knob ("rmix", "Mix riverbero", 3);
 
     l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "modType", 1 }, "Modulazione",
-                                                         juce::StringArray { "Off", "Chorus", "Flanger", "Phaser" }, 0));
-    l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "cabOn", 1 }, "Cabinet", true));
+                                                         juce::StringArray { "Off", "Chorus", "Flanger", "Phaser", "Tremolo" }, 0));
+    l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "cabMode", 1 }, "Cabinet",
+                                                         juce::StringArray { "Nessuno", "Simulato", "IR" }, 1));
+    l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "source", 1 }, "Sorgente",
+                                                         juce::StringArray { "Ingresso", "Riff di prova", "File" }, 1));
     l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "dlyOn", 1 }, "Delay", false));
     l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "revOn", 1 }, "Riverbero", false));
     return l;
@@ -64,6 +67,8 @@ void AmpLabProcessor::prepareToPlay (double sr, int block)
     chorus.prepare (spec);
     phaser.prepare (spec);
     reverb.prepare (spec);
+    conv.prepare (spec);
+    makeTestRiff (sr);
     delay.prepare (spec);
     delay.setMaximumDelayInSamples ((int) (sr * 1.2));
     delay.reset();
@@ -85,6 +90,26 @@ void AmpLabProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuf
         buf.copyFrom (1, 0, buf, 0, 0, n);   // la chitarra arriva sul canale 1: la copio anche sul 2
 
     auto p = [this] (const char* id) { return apvts.getRawParameterValue (id)->load(); };
+
+    // Sorgente interna: riff di prova o file caricato (sostituisce l'ingresso)
+    {
+        const juce::SpinLock::ScopedTryLockType tl (sampleLock);
+        if (tl.isLocked() && samplePending) { audioSample = pendingSample; samplePending = false; playPos = 0; }
+    }
+    const int srcMode = (int) p ("source");
+    if (srcMode > 0)
+    {
+        const juce::AudioBuffer<float>* sb = (srcMode == 1) ? &testBuf : audioSample.get();
+        if (sb != nullptr && sb->getNumSamples() > 0)
+        {
+            const int len = sb->getNumSamples();
+            const float* s = sb->getReadPointer (0);
+            float* d = buf.getWritePointer (0);
+            if (playPos >= len) playPos = 0;
+            for (int i = 0; i < n; ++i) { d[i] = s[playPos]; if (++playPos >= len) playPos = 0; }
+            if (buf.getNumChannels() > 1) buf.copyFrom (1, 0, buf, 0, 0, n);
+        }
+    }
     juce::dsp::AudioBlock<float> block (buf);
     juce::dsp::ProcessContextReplacing<float> ctx (block);
 
@@ -127,7 +152,9 @@ void AmpLabProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuf
     bass.process (ctx); mid.process (ctx); treble.process (ctx);
 
     // Cabinet simulato
-    if (p ("cabOn") > 0.5f) { cabHp.process (ctx); cabLp1.process (ctx); cabLp2.process (ctx); }
+    const int cm = (int) p ("cabMode");
+    if (cm == 1) { cabHp.process (ctx); cabLp1.process (ctx); cabLp2.process (ctx); }
+    else if (cm == 2 && irLoaded.load()) conv.process (ctx);
 
     // Modulazione
     const int mt = (int) p ("modType");
@@ -135,7 +162,18 @@ void AmpLabProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuf
     {
         const float rate = 0.1f * std::pow (10.0f, p ("modRate") / 5.0f);
         const float depth = p ("modDepth") / 10.0f, mix = p ("modMix") / 10.0f;
-        if (mt == 3)
+        if (mt == 4)
+        {
+            const float inc = rate / (float) sampleRate;
+            for (int i = 0; i < n; ++i)
+            {
+                const float g = 1.0f - depth * 0.5f * (1.0f + std::sin (juce::MathConstants<float>::twoPi * trPhase));
+                const float m = (1.0f - mix) + mix * g;
+                for (int c = 0; c < buf.getNumChannels(); ++c) buf.getWritePointer (c)[i] *= m;
+                trPhase += inc; if (trPhase >= 1.0f) trPhase -= 1.0f;
+            }
+        }
+        else if (mt == 3)
         {
             phaser.setRate (rate); phaser.setDepth (depth); phaser.setCentreFrequency (800.0f);
             phaser.setFeedback (0.4f); phaser.setMix (mix);
@@ -188,6 +226,79 @@ void AmpLabProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuf
     buf.applyGainRamp (0, n, lastMaster, master);
     lastMaster = master;
     outLevel.store (std::max (buf.getMagnitude (0, n), outLevel.load() * 0.9f));
+}
+
+void AmpLabProcessor::makeTestRiff (double sr)
+{
+    const int len = (int) (sr * 6.0);
+    testBuf.setSize (1, len);
+    testBuf.clear();
+    float* o = testBuf.getWritePointer (0);
+    struct Chord { double t; float f[3]; };
+    const Chord chords[] = { { 0.0, { 82.4f, 123.5f, 164.8f } }, { 1.5, { 110.0f, 164.8f, 220.0f } },
+                             { 3.0, { 98.0f, 146.8f, 196.0f } }, { 4.5, { 73.4f, 110.0f, 146.8f } } };
+    juce::Random rnd (1234);
+    for (auto& ch : chords)
+        for (int k = 0; k < 3; ++k)
+        {
+            const int N = (int) std::round (sr / ch.f[k]);
+            std::vector<float> ring ((size_t) N);
+            for (auto& v : ring) v = rnd.nextFloat() * 2.0f - 1.0f;
+            int pp = 0, s = (int) ((ch.t + k * 0.014) * sr);
+            const int end = std::min (len, s + (int) (sr * 1.5));
+            for (; s < end; ++s)
+            {
+                const float y = 0.5f * (ring[(size_t) pp] + ring[(size_t) ((pp + 1) % N)]) * 0.997f;
+                ring[(size_t) pp] = y;
+                pp = (pp + 1) % N;
+                o[s] += y * 0.25f;
+            }
+        }
+}
+
+bool AmpLabProcessor::loadSample (const juce::File& f)
+{
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (f));
+    if (r == nullptr) return false;
+    const int len = (int) std::min<juce::int64> (r->lengthInSamples, (juce::int64) (r->sampleRate * 60.0));
+    if (len < 2) return false;
+    juce::AudioBuffer<float> tmp ((int) r->numChannels, len);
+    r->read (&tmp, 0, len, 0, true, true);
+    const double ratio = r->sampleRate / sampleRate;
+    const int outLen = std::max (2, (int) (len / ratio) - 1);
+    auto out = std::make_shared<juce::AudioBuffer<float>> (1, outLen);
+    float* o = out->getWritePointer (0);
+    float pk = 0.0f;
+    for (int i = 0; i < outLen; ++i)
+    {
+        const double pos = i * ratio;
+        const int i0 = std::min ((int) pos, len - 1), i1 = std::min (i0 + 1, len - 1);
+        const float fr = (float) (pos - i0);
+        float s = 0.0f;
+        for (int c = 0; c < tmp.getNumChannels(); ++c) s += tmp.getSample (c, i0) * (1.0f - fr) + tmp.getSample (c, i1) * fr;
+        o[i] = s / (float) tmp.getNumChannels();
+        pk = std::max (pk, std::abs (o[i]));
+    }
+    if (pk > 0.0f) out->applyGain (0.3f / pk);
+    {
+        const juce::SpinLock::ScopedLockType sl (sampleLock);
+        pendingSample = out;
+        samplePending = true;
+    }
+    if (auto* sp = apvts.getParameter ("source")) sp->setValueNotifyingHost (sp->convertTo0to1 (2.0f));
+    return true;
+}
+
+bool AmpLabProcessor::loadIR (const juce::File& f)
+{
+    if (! f.existsAsFile()) return false;
+    conv.loadImpulseResponse (f, juce::dsp::Convolution::Stereo::yes, juce::dsp::Convolution::Trim::yes, 0,
+                              juce::dsp::Convolution::Normalise::yes);
+    irLoaded = true;
+    if (auto* cp = apvts.getParameter ("cabMode")) cp->setValueNotifyingHost (cp->convertTo0to1 (2.0f));
+    return true;
 }
 
 juce::AudioProcessorEditor* AmpLabProcessor::createEditor() { return new AmpLabEditor (*this); }
