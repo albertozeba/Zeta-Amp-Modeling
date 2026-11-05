@@ -1,5 +1,21 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "NAM/get_dsp.h"
+#include <filesystem>
+
+namespace
+{
+// Compatibile sia con process(NAM_SAMPLE*, ...) sia con la versione a canali process(NAM_SAMPLE**, ...)
+template <class T>
+auto namProcess (T& d, NAM_SAMPLE* in, NAM_SAMPLE* out, int n, int) -> decltype (d.process (&in, &out, n), void())
+{
+    NAM_SAMPLE* ip[1] = { in };
+    NAM_SAMPLE* op[1] = { out };
+    d.process (ip, op, n);
+}
+template <class T>
+void namProcess (T& d, NAM_SAMPLE* in, NAM_SAMPLE* out, int n, long) { d.process (in, out, n); }
+}
 
 using Coeffs = juce::dsp::IIR::Coefficients<float>;
 
@@ -33,6 +49,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout AmpLabProcessor::createLayou
                                                          juce::StringArray { "Nessuno", "Simulato", "IR" }, 1));
     l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "source", 1 }, "Sorgente",
                                                          juce::StringArray { "Ingresso", "Riff di prova", "File" }, 1));
+    l.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "ampMode", 1 }, "Ampli",
+                                                         juce::StringArray { "Interno", "NAM" }, 0));
+    l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "namCab", 1 }, "NAM con cabinet", false));
     l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "dlyOn", 1 }, "Delay", false));
     l.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "revOn", 1 }, "Riverbero", false));
     return l;
@@ -69,6 +88,11 @@ void AmpLabProcessor::prepareToPlay (double sr, int block)
     reverb.prepare (spec);
     conv.prepare (spec);
     makeTestRiff (sr);
+
+    maxBlock = std::max (block, 64);
+    namIn.assign ((size_t) maxBlock, (NAM_SAMPLE) 0);
+    namOut.assign ((size_t) maxBlock, (NAM_SAMPLE) 0);
+    if (namPath.isNotEmpty()) loadNam (juce::File (namPath), false);   // ricarica il modello con i nuovi parametri audio
     delay.prepare (spec);
     delay.setMaximumDelayInSamples ((int) (sr * 1.2));
     delay.reset();
@@ -125,6 +149,31 @@ void AmpLabProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuf
 
     // Drive: distorsione con oversampling 4x
     hp.process (ctx);
+    {
+        const juce::SpinLock::ScopedTryLockType ml (modelLock);
+        if (ml.isLocked() && modelPending) { std::swap (activeModel, pendingModel); modelPending = false; }
+    }
+    const bool useNam = ((int) p ("ampMode") == 1) && activeModel != nullptr && ! namIn.empty();
+    if (useNam)
+    {
+        // Il modello NAM sostituisce drive e distorsione. La manopola Drive diventa il guadagno in ingresso al modello.
+        const float pre = juce::Decibels::decibelsToGain ((p ("drive") - 5.0f) * 2.4f);
+        buf.applyGainRamp (0, n, lastDrive, pre);
+        lastDrive = pre;
+        const int chunk = (int) namIn.size();
+        const float og = namGain.load();
+        float* d = buf.getWritePointer (0);
+        for (int off = 0; off < n; off += chunk)
+        {
+            const int m = std::min (chunk, n - off);
+            for (int i = 0; i < m; ++i) namIn[(size_t) i] = (NAM_SAMPLE) d[off + i];
+            namProcess (*activeModel, namIn.data(), namOut.data(), m, 0);
+            for (int i = 0; i < m; ++i) d[off + i] = (float) namOut[(size_t) i] * og;
+        }
+        if (buf.getNumChannels() > 1) buf.copyFrom (1, 0, buf, 0, 0, n);
+    }
+    else
+    {
     const float drv = juce::Decibels::decibelsToGain (p ("drive") * 3.6f);
     buf.applyGainRamp (0, n, lastDrive, drv);
     lastDrive = drv;
@@ -140,6 +189,7 @@ void AmpLabProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuf
         os.processSamplesDown (block);
     }
     postLp.process (ctx);
+    }
 
     // Equalizzatore a tre bande (i coefficienti si ricalcolano solo se la manopola cambia)
     auto upd = [] (Filter& f, float& last, float db, auto make)
@@ -152,7 +202,7 @@ void AmpLabProcessor::processBlock (juce::AudioBuffer<float>& buf, juce::MidiBuf
     bass.process (ctx); mid.process (ctx); treble.process (ctx);
 
     // Cabinet simulato
-    const int cm = (int) p ("cabMode");
+    const int cm = (useNam && p ("namCab") > 0.5f) ? 0 : (int) p ("cabMode");   // modello head+cab: niente cabinet aggiuntivo
     if (cm == 1) { cabHp.process (ctx); cabLp1.process (ctx); cabLp2.process (ctx); }
     else if (cm == 2 && irLoaded.load()) conv.process (ctx);
 
@@ -299,6 +349,45 @@ bool AmpLabProcessor::loadIR (const juce::File& f)
     irLoaded = true;
     if (auto* cp = apvts.getParameter ("cabMode")) cp->setValueNotifyingHost (cp->convertTo0to1 (2.0f));
     return true;
+}
+
+bool AmpLabProcessor::loadNam (const juce::File& f, bool select)
+{
+    try
+    {
+        auto m = nam::get_dsp (std::filesystem::path (f.getFullPathName().toStdString()));
+        if (m == nullptr) { namInfo = "Modello NAM non valido."; return false; }
+        m->Reset (sampleRate, (int) std::max<size_t> (namIn.size(), 64));
+        const float g = m->HasLoudness() ? juce::Decibels::decibelsToGain ((float) (-18.0 - m->GetLoudness())) : 1.0f;
+        const double er = m->GetExpectedSampleRate();
+        namGain.store (g);
+        juce::String gear;
+        {
+            const juce::var j = juce::JSON::parse (f);
+            if (auto* o = j.getProperty ("metadata", juce::var()).getDynamicObject())
+                gear = o->getProperty ("gear_type").toString();
+        }
+        const bool hasCab = gear.containsIgnoreCase ("cab");   // es. amp_cab, amp_pedal_cab
+        namInfo = "NAM: " + f.getFileName();
+        if (er > 0.0 && std::abs (er - sampleRate) > 1.0)
+            namInfo << "  (addestrato a " << juce::String ((int) er) << " Hz, in uso " << juce::String ((int) sampleRate) << " Hz)";
+        {
+            const juce::SpinLock::ScopedLockType ml (modelLock);
+            pendingModel = std::move (m);
+            modelPending = true;
+        }
+        if (hasCab) namInfo << "  (include il cabinet)";
+        else if (gear.isEmpty()) namInfo << "  (tipo non dichiarato)";
+        namPath = f.getFullPathName();
+        if (select)
+        {
+            if (auto* ap = apvts.getParameter ("ampMode")) ap->setValueNotifyingHost (1.0f);
+            if (auto* cp = apvts.getParameter ("namCab")) cp->setValueNotifyingHost (hasCab ? 1.0f : 0.0f);
+        }
+        return true;
+    }
+    catch (const std::exception& e) { namInfo = juce::String ("Errore NAM: ") + e.what(); return false; }
+    catch (...) { namInfo = "Errore nel caricamento del modello NAM."; return false; }
 }
 
 juce::AudioProcessorEditor* AmpLabProcessor::createEditor() { return new AmpLabEditor (*this); }

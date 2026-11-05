@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_dsp/juce_dsp.h>
+#include "NAM/dsp.h"
 
 class AmpLabProcessor : public juce::AudioProcessor
 {
@@ -33,6 +34,8 @@ public:
     std::atomic<bool> irLoaded { false };
     bool loadSample (const juce::File&);
     bool loadIR (const juce::File&);
+    bool loadNam (const juce::File&, bool select = true);
+    juce::String namInfo;
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -58,6 +61,13 @@ private:
     int playPos = 0;
     float trPhase = 0.0f;
     juce::dsp::Convolution conv;
+    std::unique_ptr<nam::DSP> activeModel, pendingModel;
+    bool modelPending = false;
+    juce::SpinLock modelLock;
+    std::vector<NAM_SAMPLE> namIn, namOut;
+    std::atomic<float> namGain { 1.0f };
+    juce::String namPath;
+    int maxBlock = 512;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AmpLabProcessor)
 };

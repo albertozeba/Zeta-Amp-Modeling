@@ -51,6 +51,19 @@ void AmpLook::drawRotarySlider (juce::Graphics& g, int x, int y, int w, int h, f
 
 void AmpLook::drawToggleButton (juce::Graphics& g, juce::ToggleButton& b, bool highlighted, bool)
 {
+    if (b.getComponentID() == "check")
+    {
+        const juce::Rectangle<float> box (2.0f, ((float) b.getHeight() - 14.0f) * 0.5f, 14.0f, 14.0f);
+        g.setColour (darkField);
+        g.fillRoundedRectangle (box, 3.0f);
+        g.setColour (brass);
+        g.drawRoundedRectangle (box, 3.0f, 1.2f);
+        if (b.getToggleState()) { g.setColour (lampRed); g.fillRoundedRectangle (box.reduced (3.0f), 2.0f); }
+        g.setColour (cream);
+        g.setFont (13.0f);
+        g.drawText (b.getButtonText(), b.getLocalBounds().withTrimmedLeft (22), juce::Justification::centredLeft);
+        return;
+    }
     const auto r = b.getLocalBounds().toFloat().reduced (1.0f);
     const bool on = b.getToggleState();
     g.setColour (on ? lampRed : darkField);
@@ -75,14 +88,19 @@ AmpLabEditor::AmpLabEditor (AmpLabProcessor& p) : AudioProcessorEditor (&p), pro
     srcBox.addItemList ({ "Ingresso", "Riff di prova", "File" }, 1);
     cabBox.addItemList ({ "Nessuno", "Simulato", "IR" }, 1);
     modBox.addItemList ({ "Off", "Chorus", "Flanger", "Phaser", "Tremolo" }, 1);
+    ampBox.addItemList ({ "Interno", "NAM" }, 1);
     for (juce::Component* c : { (juce::Component*) &srcBox, (juce::Component*) &cabBox, (juce::Component*) &modBox,
                                 (juce::Component*) &dlyBtn, (juce::Component*) &revBtn,
-                                (juce::Component*) &fileBtn, (juce::Component*) &irBtn })
+                                (juce::Component*) &fileBtn, (juce::Component*) &irBtn,
+                                (juce::Component*) &ampBox, (juce::Component*) &namBtn, (juce::Component*) &camBtn })
         addAndMakeVisible (*c);
 
     srcA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, "source", srcBox);
     cabA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, "cabMode", cabBox);
     modA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, "modType", modBox);
+    ampA = std::make_unique<APVTS::ComboBoxAttachment> (proc.apvts, "ampMode", ampBox);
+    camA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, "namCab", camBtn);
+    camBtn.setComponentID ("check");
     dlyA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, "dlyOn", dlyBtn);
     revA = std::make_unique<APVTS::ButtonAttachment> (proc.apvts, "revOn", revBtn);
 
@@ -100,8 +118,26 @@ AmpLabEditor::AmpLabEditor (AmpLabProcessor& p) : AudioProcessorEditor (&p), pro
                               [pr] (const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) pr->loadIR (f); });
     };
 
-    setSize (840, 660);
+    namBtn.onClick = [this, pr]
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Scegli un modello NAM", juce::File(), "*.nam");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [pr] (const juce::FileChooser& fc) { auto f = fc.getResult(); if (f.existsAsFile()) pr->loadNam (f); });
+    };
+
+    setSize (840, 672);
     startTimerHz (30);
+}
+
+// Con un modello NAM "head + cab" il cabinet e il caricamento della IR vengono disabilitati
+void AmpLabEditor::updateEnabled()
+{
+    const bool lock = proc.apvts.getRawParameterValue ("ampMode")->load() > 0.5f
+                      && proc.apvts.getRawParameterValue ("namCab")->load() > 0.5f;
+    cabBox.setEnabled (! lock);
+    irBtn.setEnabled (! lock);
+    cabBox.setAlpha (lock ? 0.35f : 1.0f);
+    irBtn.setAlpha (lock ? 0.35f : 1.0f);
 }
 
 AmpLabEditor::~AmpLabEditor() { setLookAndFeel (nullptr); }
@@ -158,6 +194,13 @@ void AmpLabEditor::paint (juce::Graphics& g)
     g.fillRoundedRectangle (meterArea.toFloat(), 4.0f);
     g.setColour (lv > 0.9f ? juce::Colours::red : lv > 0.7f ? juce::Colours::orange : juce::Colours::limegreen);
     g.fillRoundedRectangle (meterArea.toFloat().withWidth ((float) meterArea.getWidth() * lv), 4.0f);
+
+    g.setColour (cream.withAlpha (0.85f));
+    g.setFont (13.0f);
+    g.drawText (proc.namInfo.isEmpty() ? juce::String ("Ampli interno") : proc.namInfo, statusArea, juce::Justification::centredLeft);
+    g.setColour (ink);
+    g.setFont (18.0f);
+    g.drawText ("Ampli", rowRect[0].getX() + 16, rowRect[0].getY() + 86, 120, 22, juce::Justification::centredLeft);
 }
 
 void AmpLabEditor::resized()
@@ -166,6 +209,7 @@ void AmpLabEditor::resized()
     auto hdr = area.removeFromTop (56);
     {
         auto rr = hdr.withSizeKeepingCentre (hdr.getWidth(), 30);
+        namBtn.setBounds (rr.removeFromRight (130));  rr.removeFromRight (8);
         irBtn.setBounds (rr.removeFromRight (120));   rr.removeFromRight (8);
         fileBtn.setBounds (rr.removeFromRight (120)); rr.removeFromRight (8);
         srcBox.setBounds (rr.removeFromRight (170));
@@ -180,6 +224,7 @@ void AmpLabEditor::resized()
         auto head = row.removeFromLeft (150).reduced (12);
         head.removeFromTop (34);
         heads[r]->setBounds (head.removeFromTop (28));
+        if (r == 0) { head.removeFromTop (38); ampBox.setBounds (head.removeFromTop (28)); }
         std::vector<Knob*> ks;
         for (auto& k : knobs) if (k->row == r) ks.push_back (k.get());
         const int w = row.getWidth() / (int) ks.size();
@@ -190,5 +235,8 @@ void AmpLabEditor::resized()
             k->s.setBounds (c);
         }
     }
-    meterArea = area.removeFromBottom (14);
+    auto foot = area.removeFromBottom (34);
+    statusArea = foot.removeFromTop (18);
+    camBtn.setBounds (statusArea.removeFromRight (250));
+    meterArea = foot.removeFromBottom (14);
 }

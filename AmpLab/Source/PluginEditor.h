@@ -27,16 +27,17 @@ private:
     };
 
     void addKnob (const char* id, const char* name, int row);
-    void timerCallback() override { repaint (meterArea); repaint (lampRect); }
+    void updateEnabled();
+    void timerCallback() override { updateEnabled(); repaint (meterArea); repaint (lampRect); repaint (statusArea); }
 
     AmpLook look;
     AmpLabProcessor& proc;
     std::vector<std::unique_ptr<Knob>> knobs;
-    juce::ToggleButton dlyBtn { "Delay" }, revBtn { "Riverbero" };
-    juce::ComboBox srcBox, cabBox, modBox;
-    juce::TextButton fileBtn { "Carica file..." }, irBtn { "Carica IR..." };
-    std::unique_ptr<APVTS::ButtonAttachment> dlyA, revA;
-    std::unique_ptr<APVTS::ComboBoxAttachment> srcA, cabA, modA;
+    juce::ToggleButton dlyBtn { "Delay" }, revBtn { "Riverbero" }, camBtn { "Il modello NAM include il cabinet" };
+    juce::ComboBox srcBox, cabBox, modBox, ampBox;
+    juce::TextButton fileBtn { "Carica file..." }, irBtn { "Carica IR..." }, namBtn { "Carica NAM..." };
+    std::unique_ptr<APVTS::ButtonAttachment> dlyA, revA, camA;
+    std::unique_ptr<APVTS::ComboBoxAttachment> srcA, cabA, modA, ampA;
     std::unique_ptr<juce::FileChooser> chooser;
-    juce::Rectangle<int> meterArea, lampRect { 150, 26, 12, 12 }, rowRect[4];
+    juce::Rectangle<int> statusArea, meterArea, lampRect { 150, 26, 12, 12 }, rowRect[4];
 };
