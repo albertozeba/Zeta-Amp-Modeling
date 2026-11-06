@@ -39,5 +39,6 @@ private:
     std::unique_ptr<APVTS::ButtonAttachment> dlyA, revA, camA;
     std::unique_ptr<APVTS::ComboBoxAttachment> srcA, cabA, modA, ampA;
     std::unique_ptr<juce::FileChooser> chooser;
-    juce::Rectangle<int> statusArea, meterArea, lampRect { 150, 26, 12, 12 }, rowRect[4];
+    juce::Image logo;
+    juce::Rectangle<int> statusArea, meterArea, lampRect { 244, 26, 12, 12 }, rowRect[4];
 };

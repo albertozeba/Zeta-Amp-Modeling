@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "BinaryData.h"
 
 namespace
 {
@@ -78,6 +79,7 @@ void AmpLook::drawToggleButton (juce::Graphics& g, juce::ToggleButton& b, bool h
 AmpLabEditor::AmpLabEditor (AmpLabProcessor& p) : AudioProcessorEditor (&p), proc (p)
 {
     setLookAndFeel (&look);
+    logo = juce::ImageCache::getFromMemory (BinaryData::zeta_logo_png, BinaryData::zeta_logo_pngSize);
     addKnob ("gate", "Gate", 0);       addKnob ("inp", "Ingresso", 0);  addKnob ("drive", "Drive", 0);
     addKnob ("bass", "Bassi", 0);      addKnob ("mid", "Medi", 0);      addKnob ("treble", "Alti", 0);
     addKnob ("level", "Livello", 0);
@@ -170,7 +172,13 @@ void AmpLabEditor::paint (juce::Graphics& g)
     g.fillAll (bodyCol);
     g.setColour (cream);
     g.setFont (28.0f);
-    g.drawText ("Amp Lab", 16, 12, 130, 36, juce::Justification::centredLeft);
+    if (logo.isValid())
+    {
+        g.setImageResampling (juce::Graphics::highResamplingQuality);
+        g.drawImage (logo, juce::Rectangle<float> (16.0f, 8.0f, 100.0f, 40.0f),
+                     juce::RectanglePlacement::xLeft | juce::RectanglePlacement::yMid);
+    }
+    g.drawText ("Amp Lab", 128, 12, 112, 36, juce::Justification::centredLeft);
 
     const float lv = std::min (1.0f, std::sqrt (proc.outLevel.load()));
     g.setColour (lampRed.withAlpha (lv > 0.02f ? 1.0f : 0.25f));
@@ -212,7 +220,7 @@ void AmpLabEditor::resized()
         namBtn.setBounds (rr.removeFromRight (130));  rr.removeFromRight (8);
         irBtn.setBounds (rr.removeFromRight (120));   rr.removeFromRight (8);
         fileBtn.setBounds (rr.removeFromRight (120)); rr.removeFromRight (8);
-        srcBox.setBounds (rr.removeFromRight (170));
+        srcBox.setBounds (rr.removeFromRight (150));
     }
     juce::Component* heads[4] = { &cabBox, &modBox, &dlyBtn, &revBtn };
     const int hts[4] = { 150, 120, 120, 120 };

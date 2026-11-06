@@ -35,12 +35,16 @@ target_compile_features(namcore_all INTERFACE cxx_std_20)
 target_compile_definitions(namcore_all INTERFACE NAM_SAMPLE_FLOAT)
 target_link_libraries(namcore_all INTERFACE "$<LINK_LIBRARY:WHOLE_ARCHIVE,namcore>")
 
+# Logo incorporato nell'eseguibile (header dell'app)
+juce_add_binary_data(AmpLabAssets SOURCES Assets/zeta_logo.png)
+
 juce_add_plugin(AmpLab
   COMPANY_NAME "AmpLab"
   PLUGIN_MANUFACTURER_CODE Amlb
   PLUGIN_CODE Amp1
   FORMATS Standalone VST3 AU
   PRODUCT_NAME "Amp Lab"
+  ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Assets/icon.png"
   IS_SYNTH FALSE
   NEEDS_MIDI_INPUT FALSE
   MICROPHONE_PERMISSION_ENABLED TRUE
@@ -54,5 +58,5 @@ target_compile_definitions(AmpLab PUBLIC
   JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
 
 target_link_libraries(AmpLab
-  PRIVATE namcore_all juce::juce_audio_utils juce::juce_audio_formats juce::juce_dsp
+  PRIVATE AmpLabAssets namcore_all juce::juce_audio_utils juce::juce_audio_formats juce::juce_dsp
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
